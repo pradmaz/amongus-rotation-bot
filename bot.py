@@ -1,3 +1,8 @@
+import discord
+from discord.ext import commands
+from discord import app_commands
+import random
+import os
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -105,3 +110,4 @@ async def pick(interaction: discord.Interaction, amount: int):
 
 
 bot.run(TOKEN)
+
