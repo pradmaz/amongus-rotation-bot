@@ -1,250 +1,248 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
+import random
 import os
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# =========================
-# KEEP ALIVE SERVER (Railway fix)
-# =========================
-
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b'BotMaz running')
-
-def run_server():
-    server = HTTPServer(('0.0.0.0', 8080), Handler)
-    server.serve_forever()
-
-threading.Thread(target=run_server, daemon=True).start()
-
-# =========================
-# CONFIGURATION
-# =========================
+# ========================
+# CONFIG
+# ========================
 
 TOKEN = os.getenv("TOKEN")
-
-GUILD_ID = 844092170524683894
 
 PUBLIC_VC_ID = 1271597939730550885
 CLOSED_VC_ID = 1331233909224247357
 
-ROLE_ID = 1434466837243887687  # Among us Code
-WHITELIST_ROLE_ID = 1478003169232683008  # Among us Whitelist
-BLACKLIST_ROLE_ID = 1478003080745451731  # Among us Blacklist
+CODE_ROLE_ID = 1434466837243887687
 
-# =========================
-# BOT SETUP
-# =========================
+WHITELIST_ROLE_ID = 1478003169232683008
+BLACKLIST_ROLE_ID = 1478003080745451731
+
+# ========================
+# INTENTS
+# ========================
 
 intents = discord.Intents.default()
 intents.members = True
 intents.voice_states = True
 intents.guilds = True
+intents.message_content = True
+
+
+# ========================
+# BOT CLASS
+# ========================
 
 class Bot(commands.Bot):
 
     def __init__(self):
-        super().__init__(command_prefix="!", intents=intents)
+        super().__init__(
+            command_prefix="!",
+            intents=intents
+        )
 
     async def setup_hook(self):
-    await self.tree.sync()
-    print("Global commands synced successfully")
+        await self.tree.sync()
+        print("Global commands synced successfully")
+
 
 bot = Bot()
 
-# =========================
+# ========================
 # QUEUE STORAGE
-# =========================
+# ========================
 
-current_batch = []
-queue_order = []
-last_pick_amount = 0
+queue = []
+current_players = []
 
-# =========================
-# READY EVENT
-# =========================
+
+# ========================
+# HELPERS
+# ========================
+
+def get_role(member, role_id):
+    return discord.utils.get(member.roles, id=role_id)
+
+
+def is_whitelisted(member):
+    return get_role(member, WHITELIST_ROLE_ID) is not None
+
+
+def is_blacklisted(member):
+    return get_role(member, BLACKLIST_ROLE_ID) is not None
+
+
+def get_public_members(guild):
+    vc = guild.get_channel(PUBLIC_VC_ID)
+    if not vc:
+        return []
+
+    members = []
+
+    for m in vc.members:
+        if m.bot:
+            continue
+
+        if is_blacklisted(m):
+            continue
+
+        members.append(m)
+
+    return members
+
+
+# ========================
+# EVENTS
+# ========================
 
 @bot.event
 async def on_ready():
-
     print(f"Logged in as {bot.user}")
 
-# =========================
-# PICK COMMAND (Fair Queue)
-# =========================
 
-@bot.tree.command(name="pick", description="Pick players fairly")
-@app_commands.describe(amount="Number of players")
+# ========================
+# COMMAND: QUEUE
+# ========================
 
-async def pick(interaction: discord.Interaction, amount: int):
+@bot.tree.command(name="queue", description="Show queue")
+async def queue_cmd(interaction: discord.Interaction):
 
-    global current_batch, queue_order, last_pick_amount
+    guild = interaction.guild
 
-    await interaction.response.defer()
+    public_members = get_public_members(guild)
+
+    names = [m.display_name for m in public_members]
+
+    text = "\n".join(names) if names else "No one waiting"
+
+    await interaction.response.send_message(
+        f"Queue ({len(names)}):\n{text}",
+        ephemeral=True
+    )
+
+
+# ========================
+# COMMAND: RESET
+# ========================
+
+@bot.tree.command(name="reset", description="Reset lobby")
+async def reset_cmd(interaction: discord.Interaction):
+
+    global current_players, queue
 
     guild = interaction.guild
 
     public_vc = guild.get_channel(PUBLIC_VC_ID)
-
     closed_vc = guild.get_channel(CLOSED_VC_ID)
 
-    code_role = guild.get_role(ROLE_ID)
+    role = guild.get_role(CODE_ROLE_ID)
 
-    whitelist_role = guild.get_role(WHITELIST_ROLE_ID)
+    for member in closed_vc.members:
 
-    blacklist_role = guild.get_role(BLACKLIST_ROLE_ID)
+        if member.bot:
+            continue
 
-    # STEP 1: Move previous batch back (except whitelist)
-
-    returning = []
-
-    for member in current_batch:
-
-        if whitelist_role in member.roles:
+        if is_whitelisted(member):
             continue
 
         try:
-            await member.remove_roles(code_role)
-
-            await member.move_to(public_vc)
-
-            returning.append(member)
-
+            await member.remove_roles(role)
         except:
             pass
-
-    queue_order.extend(returning)
-
-    current_batch = []
-
-    # STEP 2: Add eligible public players to queue
-
-    public_members = [
-
-        m for m in public_vc.members
-
-        if not m.bot and blacklist_role not in m.roles
-
-    ]
-
-    for member in public_members:
-
-        if member not in queue_order:
-
-            queue_order.append(member)
-
-    # Remove invalid members
-
-    queue_order = [
-
-        m for m in queue_order
-
-        if m in public_vc.members and blacklist_role not in m.roles
-
-    ]
-
-    # STEP 3: Select fairly
-
-    selected = queue_order[:amount]
-
-    queue_order = queue_order[amount:]
-
-    # STEP 4: Assign role and move
-
-    for member in selected:
 
         try:
-
-            await member.add_roles(code_role)
-
-            await member.move_to(closed_vc)
-
+            await member.move_to(public_vc)
         except:
             pass
 
-    current_batch = selected
+    current_players.clear()
+    queue.clear()
 
-    last_pick_amount = amount
+    await interaction.response.send_message("Reset complete")
 
-    await interaction.followup.send(
 
-        f"✅ Picked {len(selected)} players\n"
+# ========================
+# COMMAND: PICK
+# ========================
 
-        f"👥 Remaining in queue: {len(queue_order)}"
+@bot.tree.command(name="pick", description="Pick players")
+@app_commands.describe(amount="Number of players")
+async def pick_cmd(interaction: discord.Interaction, amount: int):
 
-    )
-
-# =========================
-# QUEUE COMMAND
-# =========================
-
-@bot.tree.command(name="queue", description="Show queue size")
-
-async def queue(interaction: discord.Interaction):
-
-    await interaction.response.defer()
-
-    await interaction.followup.send(
-
-        f"👥 Players waiting in queue: {len(queue_order)}"
-
-    )
-
-# =========================
-# RESET COMMAND
-# =========================
-
-@bot.tree.command(name="reset", description="Reset queue system")
-
-async def reset(interaction: discord.Interaction):
-
-    global current_batch, queue_order
-
-    await interaction.response.defer()
+    global current_players
 
     guild = interaction.guild
 
     public_vc = guild.get_channel(PUBLIC_VC_ID)
+    closed_vc = guild.get_channel(CLOSED_VC_ID)
 
-    code_role = guild.get_role(ROLE_ID)
+    role = guild.get_role(CODE_ROLE_ID)
 
-    whitelist_role = guild.get_role(WHITELIST_ROLE_ID)
+    await interaction.response.defer()
 
-    moved = 0
+    # ========================
+    # REMOVE OLD PLAYERS
+    # ========================
 
-    for member in current_batch:
+    for member in current_players:
 
-        if whitelist_role in member.roles:
+        if is_whitelisted(member):
             continue
 
         try:
-
-            await member.remove_roles(code_role)
-
-            await member.move_to(public_vc)
-
-            moved += 1
-
+            await member.remove_roles(role)
         except:
             pass
 
-    current_batch = []
+        try:
+            await member.move_to(public_vc)
+        except:
+            pass
 
-    queue_order = []
+    # ========================
+    # BUILD FAIR QUEUE
+    # ========================
+
+    public_members = get_public_members(guild)
+
+    eligible = [m for m in public_members if m not in current_players]
+
+    if len(eligible) < amount:
+        eligible = public_members
+
+    if not eligible:
+        await interaction.followup.send("No eligible players")
+        return
+
+    picked = random.sample(eligible, min(amount, len(eligible)))
+
+    current_players = picked.copy()
+
+    # ========================
+    # MOVE AND GIVE ROLE
+    # ========================
+
+    for member in picked:
+
+        try:
+            await member.add_roles(role)
+        except:
+            pass
+
+        try:
+            await member.move_to(closed_vc)
+        except:
+            pass
+
+    names = "\n".join([m.display_name for m in picked])
 
     await interaction.followup.send(
-
-        f"🔄 Reset complete. Moved {moved} players."
-
+        f"Picked {len(picked)} players:\n{names}"
     )
 
-# =========================
-# RUN BOT
-# =========================
+
+# ========================
+# START BOT
+# ========================
 
 bot.run(TOKEN)
-
