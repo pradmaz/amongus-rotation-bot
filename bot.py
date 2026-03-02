@@ -22,7 +22,7 @@ intents = discord.Intents.default()
 intents.members = True
 intents.voice_states = True
 intents.guilds = True
-intents.message_content = True  # Required to prevent Railway log errors
+intents.message_content = True 
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -65,13 +65,13 @@ async def on_ready():
     load_data()
     try:
         await bot.tree.sync()
-        print(f"🚀 BotMaz Ultra Online: {bot.user}")
+        print(f"🚀 BotMaz Online: {bot.user}")
     except discord.Forbidden:
         print("❌ Sync Error: Bot lacks 'applications.commands' scope.")
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    """Instant role removal if a non-whitelist player leaves the match room."""
+    """Auto-remove role if a non-whitelist player leaves the match room mid-game."""
     if before.channel and before.channel.id == CLOSED_VC_ID:
         if after.channel is None or after.channel.id != CLOSED_VC_ID:
             code_role = member.guild.get_role(CODE_ROLE_ID)
@@ -85,7 +85,7 @@ async def on_voice_state_update(member, before, after):
 
 # ========= COMMANDS =========
 
-@bot.tree.command(name="pick", description="High-speed fair player selection")
+@bot.tree.command(name="pick", description="Wipes old roles and picks new players fairly")
 async def pick(interaction: discord.Interaction, amount: int):
     await interaction.response.defer()
 
@@ -96,27 +96,27 @@ async def pick(interaction: discord.Interaction, amount: int):
     whitelist = guild.get_role(WHITELIST_ROLE_ID)
     blacklist = guild.get_role(BLACKLIST_ROLE_ID)
 
-    # 1. CLEAN PREVIOUS MATCH (Move Match 1 back to Public)
-    cleanup_tasks = []
-    for uid in list(current_match):
-        member = guild.get_member(uid)
-        if not member or (whitelist and whitelist in member.roles):
-            continue
+    # 1️⃣ GLOBAL RESET (Merges /reset into /pick)
+    # Scans every member in the server to ensure NO ONE has the role except staff
+    reset_tasks = []
+    for m in guild.members:
+        # If they have the code role and aren't Whitelisted, they lose it
+        if code_role in m.roles and (not whitelist or whitelist not in m.roles):
+            async def strip_role(member=m):
+                try:
+                    await member.remove_roles(code_role)
+                    # Move them back to public if they are still lingering in Closed VC
+                    if member.voice and member.voice.channel and member.voice.channel.id == CLOSED_VC_ID:
+                        await member.move_to(public_vc)
+                except: pass
+            reset_tasks.append(strip_role())
 
-        async def cleanup(m=member):
-            try:
-                if code_role in m.roles: await m.remove_roles(code_role)
-                if m.voice and m.voice.channel and m.voice.channel.id == CLOSED_VC_ID:
-                    await m.move_to(public_vc)
-            except: pass
-        cleanup_tasks.append(cleanup())
-
-    if cleanup_tasks:
-        await asyncio.gather(*cleanup_tasks)
+    if reset_tasks:
+        await asyncio.gather(*reset_tasks)
     
     current_match.clear()
 
-    # 2. BUILD ELIGIBLE LISTS
+    # 2️⃣ BUILD ELIGIBLE LISTS
     eligible = []
     wl_to_move = []
 
@@ -127,7 +127,7 @@ async def pick(interaction: discord.Interaction, amount: int):
             wl_to_move.append(m)
             continue
         
-        # Priority logic: (Waited) - (Recent Games * 2)
+        # Priority logic
         score = waited(m.id) - (matches_last_24h(m.id) * 2)
         eligible.append((score, m))
 
@@ -137,11 +137,11 @@ async def pick(interaction: discord.Interaction, amount: int):
     if not selected and not wl_to_move:
         return await interaction.followup.send("No players in Public VC.")
 
-    # 3. EXECUTE MOVEMENTS (Parallelized)
+    # 3️⃣ EXECUTE NEW MATCH (Parallel)
     tasks = []
     lines = []
 
-    # Whitelist Move (Only from Public VC)
+    # Whitelist Move
     for m in wl_to_move:
         async def wl_task(member=m):
             try:
@@ -159,7 +159,7 @@ async def pick(interaction: discord.Interaction, amount: int):
         
         prev_wait = stats["waited"]
         stats["plays"].append(now())
-        stats["waited"] = 0 # Played, so reset wait counter
+        stats["waited"] = 0 
 
         async def sel_task(member=m):
             try:
@@ -169,13 +169,12 @@ async def pick(interaction: discord.Interaction, amount: int):
             except: pass
         tasks.append(sel_task())
         
-        # Format requested: (Games: 0, Waited: 0)
         lines.append(f"✅ **{m.display_name}** (Games: {len(stats['plays'])}, Waited: {prev_wait})")
 
     if tasks:
         await asyncio.gather(*tasks)
 
-    # 4. UPDATE WAIT COUNTER FOR THOSE LEFT BEHIND
+    # 4️⃣ UPDATE WAIT COUNTERS
     for m in public_vc.members:
         if not m.bot and m.id not in current_match:
             player_stats.setdefault(str(m.id), {"plays": [], "waited": 0})["waited"] += 1
@@ -183,11 +182,12 @@ async def pick(interaction: discord.Interaction, amount: int):
     save_data()
     
     wl_msg = f"⭐ Moved {len(wl_to_move)} Whitelisted players.\n" if wl_to_move else ""
-    await interaction.followup.send(f"### Match Started!\n{wl_msg}" + "\n".join(lines))
+    await interaction.followup.send(f"### New Match Started!\n{wl_msg}" + "\n".join(lines))
 
-@bot.tree.command(name="reset", description="Force reset roles and positions")
+@bot.tree.command(name="reset", description="Manual force reset")
 async def reset(interaction: discord.Interaction):
     await interaction.response.defer()
+    # Logic remains same but simplified since it's now part of /pick
     guild = interaction.guild
     public_vc = guild.get_channel(PUBLIC_VC_ID)
     closed_vc = guild.get_channel(CLOSED_VC_ID)
@@ -195,18 +195,18 @@ async def reset(interaction: discord.Interaction):
     whitelist = guild.get_role(WHITELIST_ROLE_ID)
 
     tasks = []
-    for m in closed_vc.members:
-        if whitelist and whitelist in m.roles: continue
-        async def reset_task(member=m):
-            try:
-                if code_role in member.roles: await member.remove_roles(code_role)
-                await member.move_to(public_vc)
-            except: pass
-        tasks.append(reset_task())
+    for m in guild.members:
+        if code_role in m.roles and (not whitelist or whitelist not in m.roles):
+            async def manual_reset(member=m):
+                try:
+                    await member.remove_roles(code_role)
+                    if member.voice and member.voice.channel and member.voice.channel.id == CLOSED_VC_ID:
+                        await member.move_to(public_vc)
+                except: pass
+            tasks.append(manual_reset())
 
-    if tasks:
-        await asyncio.gather(*tasks)
+    if tasks: await asyncio.gather(*tasks)
     current_match.clear()
-    await interaction.followup.send(f"✅ Reset complete. Cleared {len(tasks)} players.")
+    await interaction.followup.send(f"✅ Reset complete. Cleared roles/positions.")
 
 bot.run(TOKEN)
