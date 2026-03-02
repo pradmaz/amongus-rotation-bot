@@ -3,6 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 import random
 import os
+import time
 
 # ========================
 # CONFIGURATION
@@ -16,6 +17,8 @@ CLOSED_VC_ID = 1331233909224247357
 CODE_ROLE_ID = 1434466837243887687
 WHITELIST_ROLE_ID = 1478003169232683008
 BLACKLIST_ROLE_ID = 1478003080745451731
+
+DAY_SECONDS = 86400  # 24 hours rolling window
 
 # ========================
 # INTENTS
@@ -41,15 +44,25 @@ class Bot(commands.Bot):
 
     async def setup_hook(self):
         await self.tree.sync()
-        print("Global commands synced successfully")
+        print("Global commands synced")
 
 bot = Bot()
 
 # ========================
-# STORAGE
+# MATCH TRACKING
 # ========================
 
 current_players = []
+match_counter = 0
+
+# player_stats structure:
+# {
+#   user_id: {
+#       "plays": [timestamps in last 24h],
+#       "last_match": match_number
+#   }
+# }
+player_stats = {}
 
 # ========================
 # ROLE HELPERS
@@ -70,7 +83,7 @@ def has_code_role(member):
 
 @bot.event
 async def on_ready():
-    print(f"BotMaz is online as {bot.user}")
+    print(f"BotMaz online as {bot.user}")
 
 # ========================
 # VOICE STATE UPDATE
@@ -89,7 +102,7 @@ async def on_voice_state_update(member, before, after):
 
     code_role = guild.get_role(CODE_ROLE_ID)
 
-    # WHITELIST: Always keep in Closed VC and always keep role
+    # WHITELIST: Always stay in closed VC
     if is_whitelisted(member):
 
         if after.channel == public_vc:
@@ -108,7 +121,7 @@ async def on_voice_state_update(member, before, after):
 
         return
 
-    # NORMAL PLAYER: Remove role if leaves Closed VC
+    # NORMAL PLAYER: remove role if leaving closed VC
     if before.channel == closed_vc and after.channel != closed_vc:
 
         if has_code_role(member):
@@ -147,35 +160,38 @@ def get_public_players(guild):
 # QUEUE COMMAND
 # ========================
 
-@bot.tree.command(name="queue", description="Show public queue")
+@bot.tree.command(name="queue", description="Show queue")
 
 async def queue_cmd(interaction: discord.Interaction):
 
-    guild = interaction.guild
-
-    players = get_public_players(guild)
+    players = get_public_players(interaction.guild)
 
     if not players:
 
-        await interaction.response.send_message("No players waiting.")
+        await interaction.response.send_message("Queue empty.")
         return
 
-    names = "\n".join(p.display_name for p in players)
+    msg = "Queue:\n\n"
 
-    await interaction.response.send_message(
-        f"Queue ({len(players)} players):\n{names}"
-    )
+    for p in players:
+        msg += f"{p.display_name}\n"
+
+    msg += f"\nTotal: {len(players)} players"
+
+    await interaction.response.send_message(msg)
 
 # ========================
 # PICK COMMAND
 # ========================
 
-@bot.tree.command(name="pick", description="Pick players")
+@bot.tree.command(name="pick", description="Pick players fairly")
 @app_commands.describe(amount="Number of players")
 
 async def pick_cmd(interaction: discord.Interaction, amount: int):
 
     global current_players
+    global match_counter
+    global player_stats
 
     await interaction.response.defer()
 
@@ -186,7 +202,38 @@ async def pick_cmd(interaction: discord.Interaction, amount: int):
 
     code_role = guild.get_role(CODE_ROLE_ID)
 
-    # Move previous players back (except whitelist)
+    match_counter += 1
+
+    # ========================
+    # MOVE WHITELIST TO CLOSED VC
+    # ========================
+
+    whitelist_moved = 0
+
+    for member in public_vc.members:
+
+        if member.bot:
+            continue
+
+        if is_whitelisted(member):
+
+            if not has_code_role(member):
+
+                try:
+                    await member.add_roles(code_role)
+                except:
+                    pass
+
+            try:
+                await member.move_to(closed_vc)
+                whitelist_moved += 1
+            except:
+                pass
+
+    # ========================
+    # MOVE OLD PLAYERS BACK
+    # ========================
+
     for member in current_players:
 
         if is_whitelisted(member):
@@ -202,6 +249,10 @@ async def pick_cmd(interaction: discord.Interaction, amount: int):
         except:
             pass
 
+    # ========================
+    # PICK NEW PLAYERS
+    # ========================
+
     eligible = get_public_players(guild)
 
     if not eligible:
@@ -216,6 +267,10 @@ async def pick_cmd(interaction: discord.Interaction, amount: int):
 
     current_players = picked.copy()
 
+    result_lines = []
+
+    now = time.time()
+
     for member in picked:
 
         try:
@@ -228,11 +283,53 @@ async def pick_cmd(interaction: discord.Interaction, amount: int):
         except:
             pass
 
-    names = "\n".join(member.display_name for member in picked)
+        uid = member.id
 
-    await interaction.followup.send(
-        f"Picked {len(picked)} players:\n{names}"
+        if uid not in player_stats:
+
+            player_stats[uid] = {
+                "plays": [],
+                "last_match": 0
+            }
+
+        # Remove plays older than 24h
+        player_stats[uid]["plays"] = [
+            t for t in player_stats[uid]["plays"]
+            if now - t <= DAY_SECONDS
+        ]
+
+        plays_count = len(player_stats[uid]["plays"])
+
+        last_match = player_stats[uid]["last_match"]
+
+        wait = (
+            None
+            if last_match == 0
+            else match_counter - last_match
+        )
+
+        # Add new play
+        player_stats[uid]["plays"].append(now)
+        player_stats[uid]["last_match"] = match_counter
+
+        wait_text = (
+            "First match"
+            if wait is None
+            else f"Waited {wait} matches"
+        )
+
+        result_lines.append(
+            f"{member.display_name} — Played {plays_count+1} in last 24h | {wait_text}"
+        )
+
+    msg = (
+        f"Match #{match_counter}\n\n"
+        f"Whitelist moved: {whitelist_moved}\n"
+        f"Picked {len(picked)} players:\n\n"
+        + "\n".join(result_lines)
     )
+
+    await interaction.followup.send(msg)
 
 # ========================
 # RESET COMMAND
@@ -252,7 +349,6 @@ async def reset_cmd(interaction: discord.Interaction):
     removed = 0
     moved = 0
 
-    # Remove role from normal players only
     for member in guild.members:
 
         if member.bot:
@@ -269,7 +365,6 @@ async def reset_cmd(interaction: discord.Interaction):
             except:
                 pass
 
-    # Move normal players back
     for member in closed_vc.members:
 
         if member.bot:
@@ -285,7 +380,10 @@ async def reset_cmd(interaction: discord.Interaction):
             pass
 
     await interaction.response.send_message(
-        f"Reset complete\nRoles removed: {removed}\nUsers moved: {moved}\nWhitelist untouched."
+        f"Reset complete\n"
+        f"Roles removed: {removed}\n"
+        f"Users moved: {moved}\n"
+        f"Whitelist untouched"
     )
 
 # ========================
