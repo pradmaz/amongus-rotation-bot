@@ -52,7 +52,7 @@ bot = Bot()
 current_players = []
 
 # ========================
-# HELPERS
+# ROLE HELPERS
 # ========================
 
 def is_whitelisted(member):
@@ -64,36 +64,17 @@ def is_blacklisted(member):
 def has_code_role(member):
     return discord.utils.get(member.roles, id=CODE_ROLE_ID) is not None
 
-def get_public_members(guild):
-
-    vc = guild.get_channel(PUBLIC_VC_ID)
-
-    if not vc:
-        return []
-
-    valid = []
-
-    for member in vc.members:
-
-        if member.bot:
-            continue
-
-        if is_blacklisted(member):
-            continue
-
-        valid.append(member)
-
-    return valid
-
 # ========================
-# EVENTS
+# READY EVENT
 # ========================
 
 @bot.event
 async def on_ready():
     print(f"BotMaz is online as {bot.user}")
 
-# AUTO REMOVE ROLE IF LEAVE CLOSED VC
+# ========================
+# VOICE STATE UPDATE
+# ========================
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -101,46 +82,95 @@ async def on_voice_state_update(member, before, after):
     if member.bot:
         return
 
-    closed_vc = member.guild.get_channel(CLOSED_VC_ID)
+    guild = member.guild
 
+    public_vc = guild.get_channel(PUBLIC_VC_ID)
+    closed_vc = guild.get_channel(CLOSED_VC_ID)
+
+    code_role = guild.get_role(CODE_ROLE_ID)
+
+    # WHITELIST: Always keep in Closed VC and always keep role
+    if is_whitelisted(member):
+
+        if after.channel == public_vc:
+
+            try:
+                await member.move_to(closed_vc)
+            except:
+                pass
+
+        if code_role not in member.roles:
+
+            try:
+                await member.add_roles(code_role)
+            except:
+                pass
+
+        return
+
+    # NORMAL PLAYER: Remove role if leaves Closed VC
     if before.channel == closed_vc and after.channel != closed_vc:
 
         if has_code_role(member):
 
             try:
-                role = member.guild.get_role(CODE_ROLE_ID)
-                await member.remove_roles(role)
-                print(f"Removed code role from {member.display_name}")
+                await member.remove_roles(code_role)
             except:
                 pass
 
 # ========================
-# COMMAND: QUEUE
+# GET PUBLIC PLAYERS
 # ========================
 
-@bot.tree.command(name="queue", description="Show players in public VC")
+def get_public_players(guild):
+
+    public_vc = guild.get_channel(PUBLIC_VC_ID)
+
+    players = []
+
+    for member in public_vc.members:
+
+        if member.bot:
+            continue
+
+        if is_blacklisted(member):
+            continue
+
+        if is_whitelisted(member):
+            continue
+
+        players.append(member)
+
+    return players
+
+# ========================
+# QUEUE COMMAND
+# ========================
+
+@bot.tree.command(name="queue", description="Show public queue")
 
 async def queue_cmd(interaction: discord.Interaction):
 
     guild = interaction.guild
 
-    members = get_public_members(guild)
+    players = get_public_players(guild)
 
-    if not members:
+    if not players:
+
         await interaction.response.send_message("No players waiting.")
         return
 
-    names = "\n".join(m.display_name for m in members)
+    names = "\n".join(p.display_name for p in players)
 
     await interaction.response.send_message(
-        f"Queue ({len(members)} players):\n{names}"
+        f"Queue ({len(players)} players):\n{names}"
     )
 
 # ========================
-# COMMAND: PICK
+# PICK COMMAND
 # ========================
 
-@bot.tree.command(name="pick", description="Pick players fairly")
+@bot.tree.command(name="pick", description="Pick players")
 @app_commands.describe(amount="Number of players")
 
 async def pick_cmd(interaction: discord.Interaction, amount: int):
@@ -156,8 +186,7 @@ async def pick_cmd(interaction: discord.Interaction, amount: int):
 
     code_role = guild.get_role(CODE_ROLE_ID)
 
-    # MOVE OLD PLAYERS BACK
-
+    # Move previous players back (except whitelist)
     for member in current_players:
 
         if is_whitelisted(member):
@@ -173,9 +202,7 @@ async def pick_cmd(interaction: discord.Interaction, amount: int):
         except:
             pass
 
-    # GET NEW PLAYERS
-
-    eligible = get_public_members(guild)
+    eligible = get_public_players(guild)
 
     if not eligible:
 
@@ -188,8 +215,6 @@ async def pick_cmd(interaction: discord.Interaction, amount: int):
     picked = random.sample(eligible, amount)
 
     current_players = picked.copy()
-
-    # ASSIGN ROLE AND MOVE
 
     for member in picked:
 
@@ -210,10 +235,10 @@ async def pick_cmd(interaction: discord.Interaction, amount: int):
     )
 
 # ========================
-# COMMAND: RESET
+# RESET COMMAND
 # ========================
 
-@bot.tree.command(name="reset", description="Reset and remove ALL code roles")
+@bot.tree.command(name="reset", description="Reset lobby safely")
 
 async def reset_cmd(interaction: discord.Interaction):
 
@@ -227,11 +252,13 @@ async def reset_cmd(interaction: discord.Interaction):
     removed = 0
     moved = 0
 
-    # REMOVE ROLE FROM EVERYONE
-
+    # Remove role from normal players only
     for member in guild.members:
 
         if member.bot:
+            continue
+
+        if is_whitelisted(member):
             continue
 
         if has_code_role(member):
@@ -242,11 +269,13 @@ async def reset_cmd(interaction: discord.Interaction):
             except:
                 pass
 
-    # MOVE EVERYONE FROM CLOSED VC
-
+    # Move normal players back
     for member in closed_vc.members:
 
         if member.bot:
+            continue
+
+        if is_whitelisted(member):
             continue
 
         try:
@@ -255,27 +284,9 @@ async def reset_cmd(interaction: discord.Interaction):
         except:
             pass
 
-    # VERIFY CLEAN
-
-    remaining = []
-
-    for member in guild.members:
-
-        if has_code_role(member):
-            remaining.append(member.display_name)
-
-    msg = (
-        f"Reset complete\n\n"
-        f"Roles removed: {removed}\n"
-        f"Users moved: {moved}\n"
+    await interaction.response.send_message(
+        f"Reset complete\nRoles removed: {removed}\nUsers moved: {moved}\nWhitelist untouched."
     )
-
-    if remaining:
-        msg += f"WARNING: Still has role: {', '.join(remaining)}"
-    else:
-        msg += "SUCCESS: No one has the code role"
-
-    await interaction.response.send_message(msg)
 
 # ========================
 # RUN BOT
