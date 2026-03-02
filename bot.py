@@ -1,8 +1,17 @@
-import discord
-from discord.ext import commands
-from discord import app_commands
-import random
-import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'Bot is running')
+
+def run_server():
+    server = HTTPServer(('0.0.0.0', 8080), Handler)
+    server.serve_forever()
+
+threading.Thread(target=run_server, daemon=True).start()
 
 TOKEN = os.getenv("TOKEN")
 
@@ -93,5 +102,6 @@ async def pick(interaction: discord.Interaction, amount: int):
     current_batch = selected
 
     await interaction.followup.send(f"Picked {len(selected)} players.")
+
 
 bot.run(TOKEN)
