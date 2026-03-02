@@ -48,9 +48,13 @@ class Bot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
 
-    async def setup_hook(self):
-        await self.tree.sync()
-        print("Commands synced")
+    GUILD_ID = 1271597939730550885  # your server ID
+
+async def setup_hook(self):
+    guild = discord.Object(id=GUILD_ID)
+    self.tree.copy_global_to(guild=guild)
+    await self.tree.sync(guild=guild)
+    print("Commands synced to guild")
 
 bot = Bot()
 
@@ -214,3 +218,4 @@ async def reset(interaction: discord.Interaction):
 # =========================
 
 bot.run(TOKEN)
+
