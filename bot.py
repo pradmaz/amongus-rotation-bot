@@ -1,18 +1,21 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
 import os
 import time
 import json
 import asyncio
 
 # ========= CONFIGURATION =========
-TOKEN = os.getenv("TOKEN")  # Make sure you set this in your environment
+TOKEN = os.getenv("TOKEN")
 
 PUBLIC_VC_ID = 1271597939730550885
 CLOSED_VC_ID = 1331233909224247357
 CODE_ROLE_ID = 1434466837243887687
 WHITELIST_ROLE_ID = 1478003169232683008
 BLACKLIST_ROLE_ID = 1478003080745451731
+PRADMAZ_ROLE_ID = 844092555679105034
+
 DAY_SECONDS = 86400
 
 # ========= INITIALIZATION =========
@@ -25,6 +28,12 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 current_match = set()
 player_stats = {}
+
+# ========= ROLE CHECK =========
+def is_pradmaz():
+    async def predicate(interaction: discord.Interaction):
+        return any(role.id == PRADMAZ_ROLE_ID for role in interaction.user.roles)
+    return app_commands.check(predicate)
 
 # ========= DATA PERSISTENCE =========
 def save_data():
@@ -69,8 +78,20 @@ async def on_ready():
     except discord.Forbidden:
         print("❌ Slash command sync failed.")
 
+# ========= ERROR HANDLING =========
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error):
+    if isinstance(error, app_commands.errors.CheckFailure):
+        await interaction.response.send_message(
+            "❌ Only **PradMaz role** can use this command.",
+            ephemeral=True
+        )
+    else:
+        raise error
+
 # ========= COMMAND =========
 @bot.tree.command(name="pick", description="Global reset and sticky-role selection")
+@is_pradmaz()  # 🔒 Restriction applied here
 async def pick(interaction: discord.Interaction, amount: int):
     await interaction.response.defer()
 
